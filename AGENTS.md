@@ -27,7 +27,7 @@ Every fact shown to a user must trace back to the Evidence Store or another name
 | Database | SQLite |
 | Initial interface | CLI |
 | Frontend (later) | React + TypeScript allowed once the CLI and Agent loop fully work — not before. Calls a small API over the Evidence Store; never duplicates engine logic |
-| Agent runtime | Hand-written tool-calling loop — no framework. AI provider still being finalized — see Section 3 |
+| Agent runtime | Hand-written tool-calling loop — no framework. AI provider: IBM watsonx.ai, via its chat API's native tool calling (confirmed models include `ibm/granite-3-8b-instruct`) |
 
 Start simple; don't add infrastructure for its own sake (Postgres, Docker, etc. can come later if justified). **Fixed regardless:** the Dependency Analyzer, Risk Scorer, Evidence Store, and Agent must never be split into separately-networked services — a frontend calling one local API over the Evidence Store is fine, turning the engines into microservices is not.
 
@@ -49,7 +49,7 @@ Example tools: `get_risk_score(file)`, `get_blast_radius(file)`, `get_style_conf
 
 ## 4. Deterministic engines: Dependency Analyzer & Risk Scorer
 
-**Dependency Analyzer:** determine what actually depends on a file — never let an LLM guess this. Build **one** language adapter for the MVP (Python via `ast`). Shared edge format regardless of language: `(source_file, target_file, relationship_type, confidence)` — the rest of Guardian never needs to know how an adapter works internally, so adding a language later is a contained change. **Blast radius** = full transitive closure (`descendants()`), grouped by depth internally, but the passport only ever shows a summary (direct vs. indirect counts — see Section 6). **Seeding:** a separate `guardian scan` populates the Evidence Store from a full-repo pass, once; `guardian analyze` always reads from that cache and never re-parses per run.
+**Dependency Analyzer:** determine what actually depends on a file — never let an LLM guess this. Build **one** language adapter for the MVP (Python via `ast`). Shared edge format regardless of language: `(source_file, target_file, relationship_type, confidence)` — the rest of Guardian never needs to know how an adapter works internally, so adding a language later is a contained change. **Blast radius:** never store the precomputed transitive closure — load direct `edges` into NetworkX at query time and call `descendants()` then; the passport only ever shows a summary (direct vs. indirect counts — see Section 6).
 
 **Risk Scorer:** must be fully deterministic — never ask an AI to assign a score. Signals: fan-in, bug-fix commit frequency (keyword heuristic: fix/bug/hotfix/revert/issue refs), ownership concentration, staleness (excluded from Phase 1 by default).
 ```
@@ -58,16 +58,42 @@ risk_score = 10 × [0.40×percentile_rank(bug_fix_count) + 0.30×percentile_rank
 ```
 Percentile rank, not min-max — min-max lets one outlier "god file" crush every other score toward zero, and rank-based scoring matches the score being explicitly relative, not absolute. If staleness is excluded, renormalize remaining weights to sum to 1.0 (0.40→0.444, 0.30→0.333, 0.20→0.222) so the max stays a true 10, not 9. **The score is a relative risk indicator, not a probability of failure** — never describe `8.7/10` as "87% chance of failure." Output must include contributing factors (`fan_in`, `bug_fix_count`, `top_author_pct`, `days_since_last_touch`) so it's explainable, not a black box.
 
+**Seeding & incremental updates (`guardian scan [path]`, path optional, defaults to cwd):** the expensive work (AST parsing, `git log` calls) must only ever touch files that actually changed since the last scan — never re-parse or re-`git log` a file that didn't change. The cheap work (recomputing percentile ranks, since it's pure math over numbers already cached, no disk/git I/O) always runs across every file, every scan, because percentile rank is relative — one file's raw numbers changing can shift another untouched file's rank.
+
+Cache schema:
+- `files(path, last_touch_commit, last_touch_date, fan_in_count, bug_fix_count, top_author_pct, risk_score)` — store `last_touch_date`, never a precomputed "days since" count, since that silently goes stale by the mere passage of time even when nothing changed.
+- `edges(source_file, target_file, relationship_type, confidence)` — direct edges only, no precomputed closures.
+- `scan_meta(last_scan_commit_hash, branch)` — one row, tracks what the cache was last built from and which branch it reflects.
+
+**Detecting what changed:** use `git diff --name-status -M <scan_meta.last_scan_commit_hash> HEAD` (not `--name-only`) — this reports each file's change type: `A` (added), `M` (modified), `D` (deleted), or `R<pct>` (renamed, with a similarity percentage). This distinction matters, because each type needs different handling (below). Separately, `git status`/uncommitted changes are never relevant here — the checkpoint comparison is always between two committed states.
+
+**A file's own history** (bug-fix count, ownership %) is built with `git log --follow -- <path>`, never plain `git log` — `--follow` keeps tracking a file's history across a rename, so a renamed file doesn't wrongly look like it has a fresh, clean history when it's actually the same code with the same track record.
+
+Scan algorithm, per changed file per its status:
+- **Modified (`M`):** re-parse its AST for the new import set, re-run `git log --follow` to refresh its own row in `files`. Diff old vs. new imports to update `edges` (add rows for new imports, remove for dropped ones). For every file that gained or lost an incoming edge because of this (the changed file's import **targets**, not its dependents), bump `fan_in_count` by ±1.
+- **Added (`A`):** parse it fresh, add a new row to `files` and new `edges` for its imports; bump `fan_in_count` on its targets.
+- **Deleted (`D`):** remove its row from `files`. Remove `edges` where it was the `source_file`. For `edges` where it was the `target_file` (other files still importing something that no longer exists), don't just silently drop these — record them as a **broken import** fact, since that's a real risk signal, not noise. Decrement `fan_in_count` for whatever it used to import.
+- **Renamed (`R<pct>`), high confidence (e.g. ≥90%):** carry the `files` row forward under the new path, keeping its historical signals intact (the file's history didn't reset). Update any `edges` referencing the old path to the new one.
+- **Renamed, low confidence:** treat as delete-old + add-new rather than guessing — consistent with the "never guess, mark lower confidence or skip" rule for the analyzer itself.
+
+After all changed files are processed: recompute percentile ranks and `risk_score` across every row in `files` — cheap, in-memory, no I/O — then update `scan_meta.last_scan_commit_hash` to the new HEAD.
+
+**Branch changes:** before doing an incremental diff, compare the currently checked-out branch to `scan_meta.branch`. If it differs, don't attempt an incremental update at all — do a full rescan instead. Diffing file lists across two unrelated branch histories isn't a meaningful incremental update, and trying anyway risks silently mixing evidence from two different codebase states. Update `scan_meta.branch` after the rescan.
+
+On the very first run (no `scan_meta` row yet), do a full pass over every file instead of a diff.
+
 ## 5. Evidence Store, Change Passport, Prediction Log & Feedback Loop
 
-- **Evidence Store:** SQLite. Minimum: files, dependencies, risk info, changes, predictions. Add style fingerprints/decisions in Phase 2. Keep the schema simple until the MVP proves what's actually needed.
+- **Evidence Store:** SQLite. Core tables (`files`, `edges`, `scan_meta`) are defined in Section 4. Add a `predictions` table for the Prediction Log below, and style fingerprints/decisions in Phase 2. Keep the schema simple until the MVP proves what's actually needed.
 - **Change Passport:** answers "what should I know before merging this?" — files changed, blast radius, risk flags, relevant history, plus style/decision conflicts and recommended checks once implemented. Every claim needs a traceable source (commit hash, file path, PR number). Never show an unsupported claim.
 - **Prediction Log (part of Phase 1, not optional):** every passport generated gets permanently recorded — never discarded. This is the foundation for the Feedback Loop below.
 - **Feedback Loop (future-facing):** long-term, compare each prediction to what actually happened after merge (correct / false positive / false negative). **For the hackathon: do not claim Guardian automatically learns or adjusts its own weights unless actually implemented** — it may only measure and surface prediction accuracy. Simulated demo outcomes must be clearly labeled as simulated, never presented as real.
 
 ## 6. Input & CLI Output (confirmed)
 
-**Input:** two modes. Primary: `guardian analyze <ref1> <ref2>` (two git refs/commit hashes) — runs `git diff --name-only` internally to get the changed file list, everything downstream operates on that. Secondary: `guardian analyze --files <path>` to pass specific files directly, bypassing the diff — useful for testing a single file's passport without a real diff existing.
+**Input (reconciled — one consistent form):** `guardian analyze [path] --diff <ref1>..<ref2>` or `guardian analyze [path] --files <file1> [file2 ...]`. `path` is optional and defaults to `.` (current directory), matching `guardian scan`'s convention — the two commands must behave the same way here. `--diff` uses git's own `A..B` range syntax so it's immediately familiar. `--diff` is the primary mode (runs `git diff --name-status -M <ref1> <ref2>` internally to get the changed-file list, everything downstream operates on that); `--files` is the secondary/direct mode, bypassing the diff — useful for testing a single file's passport without a real diff existing.
+
+**Pre-flight checks, in this order, before anything else runs:** (1) does `path` exist on disk — if not, `Error: '<path>' does not exist.`; for `--files`, check each file individually the same way. (2) is `path` inside a git repository (`git rev-parse --is-inside-work-tree`) — if not, `Error: '<path>' is not a git repository. Guardian needs git history to compute risk scores.` (3) does the repo have any commits yet — if not, `No commit history found — risk scores require at least one commit.` Never let a raw git error or a Python traceback reach the user for any of these; catch and explain.
 
 **Output format (confirmed):**
 ```
@@ -100,7 +126,7 @@ Build this as a structured object first, then render it to text — this lets a 
 
 **Testing:** keep scope narrow, not exhaustive. Prioritize logic that's easy to get subtly wrong and expensive to discover wrong later: import/dependency resolution edge cases, the risk formula's math, blast-radius graph direction, Agent tool correctness. Skip simple, obviously-correct glue code (arg parsing, getters, formatting). Gut check: could this be silently wrong in a way that wouldn't show up until the demo? If yes, test it; if no, skip it. **Failure mode to treat as a bug:** the Agent stating any number, relationship, or fact that wasn't actually retrieved from evidence.
 
-**Error handling:** never silently swallow failures (invalid file, Git command failure, missing record, AI API failure) — return a useful error, never replace missing evidence with a guess. E.g., *"Historical decision data unavailable — cannot determine if this conflicts with a previous decision"* beats inventing an answer.
+**Error handling:** never silently swallow failures — return a useful error, never replace missing evidence with a guess. This includes the pre-flight checks in Section 6 (missing path/file, not a git repo, empty repo) and any other unexpected failure (Git command failure, missing record, AI API failure). E.g., *"Historical decision data unavailable — cannot determine if this conflicts with a previous decision"* beats inventing an answer.
 
 ## 8. Code quality, git discipline & security
 
