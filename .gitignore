@@ -1,1 +1,11 @@
-srs/__pychache__
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.DS_Store
+.env
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
