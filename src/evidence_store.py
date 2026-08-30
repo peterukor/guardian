@@ -30,6 +30,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Generator
 
+import networkx as nx
+
 
 # ---------------------------------------------------------------------------
 # Schema
@@ -366,10 +368,41 @@ class EvidenceStore:
             branch=row["branch"],
         )
 
-    def set_scan_meta(self, commit_hash: str, branch: str) -> None:
+    def build_graph(self) -> nx.DiGraph:
+        """
+        Reconstruct a NetworkX directed graph entirely from the stored evidence.
+
+        Every file in the files table is added as a node, including isolated
+        files that have no edges (so blast-radius lookups don't silently miss
+        them).  Every row in the edges table is added as a directed edge with
+        relationship_type and confidence preserved as edge attributes.
+
+        The resulting graph is compatible with get_blast_radius() from
+        python_adapter — the node and edge attribute format is identical to
+        what build_dependency_graph() produces.  No repository parsing or
+        adapter calls are made.
+        """
+        graph = nx.DiGraph()
+        for rec in self.get_all_files():
+            graph.add_node(rec.path)
+        for edge in self.get_all_edges():
+            graph.add_edge(
+                edge.source_file,
+                edge.target_file,
+                relationship_type=edge.relationship_type,
+                confidence=edge.confidence,
+            )
+        return graph
+
+    def set_scan_meta(self, commit_hash: str | None, branch: str | None) -> None:
         """
         Upsert the single scan_meta row. Always keyed to id=1 so there can
         only ever be one row — the CHECK constraint on the table enforces this.
+
+        commit_hash and branch may be None (e.g. a repo with no commits yet).
+        None is passed through to SQLite as NULL so that a subsequent call to
+        get_scan_meta() can distinguish "scanned but empty repo" from a real
+        commit hash — empty strings must never be used as a sentinel here.
         """
         with self._tx():
             self._conn.execute(
