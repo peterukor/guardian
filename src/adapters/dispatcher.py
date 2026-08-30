@@ -2,7 +2,7 @@
 Adapter dispatcher for Guardian.
 
 Given a repository path, detects which file extensions are present and
-returns the list of adapter `analyze` callables that apply to it.
+returns the list of adapter modules that apply to it.
 
 Design: the dispatch table maps a frozenset of file extensions to an adapter
 module.  Detection walks the repo once (cheaply, no parsing) and collects all
@@ -12,29 +12,32 @@ set is included in the result.
 Adding a new language later means adding one entry to _DISPATCH_TABLE — the
 detection loop and return logic do not change.
 
-Only .py files trigger PythonAdapter in Phase 1.  More adapters will be added
-in Phase 2 as new language support is introduced.
+Only .py files trigger the Python adapter in Phase 1.  More adapters will be
+added in Phase 2 as new language support is introduced.
+
+Return shape
+------------
+get_adapters(repo_path) returns a list of adapter modules (not bare callables),
+so that callers can invoke either adapter function:
+    adapter.analyze(repo_path)          -> list[EdgeTuple]
+    adapter.discovered_files(repo_path) -> list[str]
 """
 
 from __future__ import annotations
 
 import os
-from collections.abc import Callable
+from types import ModuleType
 
 from src.adapters import python_adapter
-from src.adapters.base import EdgeTuple
-
-# Type alias: an adapter callable that matches the shared interface.
-AdapterFn = Callable[[str], list[EdgeTuple]]
 
 # ---------------------------------------------------------------------------
 # Dispatch table — one entry per supported language.
 # Each key is a frozenset of file extensions (with leading dot) that trigger
-# this adapter.  The value is the adapter's analyze function.
+# this adapter.  The value is the adapter module itself.
 # To add a new language: add one row here, no other changes needed.
 # ---------------------------------------------------------------------------
-_DISPATCH_TABLE: list[tuple[frozenset[str], AdapterFn]] = [
-    (frozenset({".py"}), python_adapter.analyze),
+_DISPATCH_TABLE: list[tuple[frozenset[str], ModuleType]] = [
+    (frozenset({".py"}), python_adapter),
 ]
 
 # Directories to skip when scanning for extensions — same list used by the
@@ -63,9 +66,9 @@ def _collect_extensions(repo_path: str) -> frozenset[str]:
     return frozenset(extensions)
 
 
-def get_adapters(repo_path: str) -> list[AdapterFn]:
+def get_adapters(repo_path: str) -> list[ModuleType]:
     """
-    Return the list of adapter callables applicable to repo_path.
+    Return the list of adapter modules applicable to repo_path.
 
     Detection is based on file extensions found under repo_path.  Each entry
     in the dispatch table whose trigger set overlaps with the found extensions
@@ -73,10 +76,14 @@ def get_adapters(repo_path: str) -> list[AdapterFn]:
 
     Returns an empty list if no known language files are detected (e.g. a
     repo containing only config files).
+
+    Each returned module exposes:
+        module.analyze(repo_path)          -> list[EdgeTuple]
+        module.discovered_files(repo_path) -> list[str]
     """
     found_extensions = _collect_extensions(repo_path)
     return [
-        adapter_fn
-        for trigger_exts, adapter_fn in _DISPATCH_TABLE
+        adapter_module
+        for trigger_exts, adapter_module in _DISPATCH_TABLE
         if trigger_exts & found_extensions  # non-empty intersection → match
     ]

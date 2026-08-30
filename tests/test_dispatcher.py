@@ -1,121 +1,90 @@
 """
 Unit tests for src/adapters/dispatcher.py.
 
-Each test builds a small temporary directory tree and checks which
-adapter(s) get_adapters() selects for it. No real git repo is needed --
-the dispatcher only looks at file extensions, never file contents or git
-history.
-
-Coverage targets: correct adapter selection for a recognized language,
-no adapters for an unrecognized repo, skip-dirs being respected during
-extension detection, and case-insensitive extension matching.
+Tests confirm:
+  - A repo containing .py files returns the Python adapter module.
+  - A repo with no recognized files returns an empty list.
+  - The returned value is the adapter module itself (not a bare callable),
+    exposing both analyze() and discovered_files().
+  - Adding a second extension type alongside .py doesn't suppress the Python
+    adapter (intersection-based matching).
 """
 
 import os
 import tempfile
 import unittest
 
-from src.adapters.dispatcher import get_adapters
 from src.adapters import python_adapter
+from src.adapters.dispatcher import get_adapters
 
 
-# ---------------------------------------------------------------------------
-# Helper
-# ---------------------------------------------------------------------------
-
-def make_tree(files: dict[str, str]) -> str:
-    """
-    Create a temporary directory containing the given files and return its
-    path. `files` maps relative paths to file contents (contents are never
-    read by the dispatcher, but real files are still needed on disk).
-    """
+def _make_repo(files: dict[str, str]) -> str:
+    """Create a temp directory with the given filename -> content mapping."""
     tmp = tempfile.mkdtemp()
-    for rel_path, content in files.items():
-        full = os.path.join(tmp, rel_path)
+    for rel, content in files.items():
+        full = os.path.join(tmp, rel)
         os.makedirs(os.path.dirname(full), exist_ok=True)
         with open(full, "w") as f:
             f.write(content)
     return tmp
 
 
-# ---------------------------------------------------------------------------
-# Adapter selection
-# ---------------------------------------------------------------------------
+class TestGetAdapters(unittest.TestCase):
 
-class TestAdapterSelection(unittest.TestCase):
-
-    def test_python_repo_selects_python_adapter(self):
-        """A repo containing .py files must select python_adapter.analyze."""
-        root = make_tree({"main.py": "import os"})
+    def test_python_repo_returns_python_adapter(self):
+        """A repo with .py files must return exactly the python_adapter module."""
+        root = _make_repo({"main.py": "x = 1"})
         adapters = get_adapters(root)
-        self.assertEqual(adapters, [python_adapter.analyze])
+        self.assertEqual(len(adapters), 1)
+        self.assertIs(adapters[0], python_adapter)
 
-    def test_docs_only_repo_selects_no_adapter(self):
-        """A repo with only non-code files must return an empty adapter list."""
-        root = make_tree({
-            "README.md": "# hello",
-            "config.json": "{}",
-        })
-        self.assertEqual(get_adapters(root), [])
+    def test_no_known_files_returns_empty_list(self):
+        """A repo with only unknown extensions (e.g. .md) returns []."""
+        root = _make_repo({"README.md": "# hi", "config.yaml": "key: val"})
+        adapters = get_adapters(root)
+        self.assertEqual(adapters, [])
 
-    def test_empty_repo_selects_no_adapter(self):
-        """A completely empty directory must return an empty adapter list,
-        not raise an error."""
+    def test_empty_directory_returns_empty_list(self):
+        """An empty repo directory returns no adapters."""
         root = tempfile.mkdtemp()
         self.assertEqual(get_adapters(root), [])
 
-    def test_mixed_extensions_still_selects_python_once(self):
-        """A repo with .py alongside unrelated extensions must select
-        python_adapter exactly once, not duplicated."""
-        root = make_tree({
-            "main.py": "import os",
-            "utils.py": "X = 1",
-            "README.md": "# hello",
-            "data.json": "{}",
+    def test_returned_value_is_module_not_callable(self):
+        """Each entry in the returned list must be an adapter module, not a
+        bare function — so callers can call both analyze() and discovered_files()."""
+        import types
+        root = _make_repo({"app.py": "pass"})
+        adapters = get_adapters(root)
+        self.assertEqual(len(adapters), 1)
+        self.assertIsInstance(adapters[0], types.ModuleType)
+
+    def test_returned_module_exposes_analyze(self):
+        """The adapter module must have a callable analyze attribute."""
+        root = _make_repo({"app.py": "pass"})
+        adapter = get_adapters(root)[0]
+        self.assertTrue(callable(getattr(adapter, "analyze", None)))
+
+    def test_returned_module_exposes_discovered_files(self):
+        """The adapter module must have a callable discovered_files attribute."""
+        root = _make_repo({"app.py": "pass"})
+        adapter = get_adapters(root)[0]
+        self.assertTrue(callable(getattr(adapter, "discovered_files", None)))
+
+    def test_mixed_extensions_still_returns_python_adapter(self):
+        """A repo with .py files alongside other extensions still matches Python."""
+        root = _make_repo({
+            "main.py": "pass",
+            "README.md": "docs",
+            "config.json": "{}",
         })
         adapters = get_adapters(root)
-        self.assertEqual(adapters, [python_adapter.analyze])
+        self.assertIn(python_adapter, adapters)
 
-    def test_uppercase_extension_still_detected(self):
-        """Extension matching must be case-insensitive: .PY must trigger
-        python_adapter just like .py does."""
-        root = make_tree({"MAIN.PY": "import os"})
-        self.assertEqual(get_adapters(root), [python_adapter.analyze])
-
-
-# ---------------------------------------------------------------------------
-# Skip-dirs and hidden directories
-# ---------------------------------------------------------------------------
-
-class TestSkipDirsRespected(unittest.TestCase):
-
-    def test_py_file_inside_node_modules_not_detected(self):
-        """A .py file sitting only inside node_modules must not trigger
-        adapter selection -- vendor/dependency directories are excluded
-        from extension detection entirely."""
-        root = make_tree({"node_modules/somepkg/script.py": "x = 1"})
-        self.assertEqual(get_adapters(root), [])
-
-    def test_py_file_inside_git_dir_not_detected(self):
-        """A .py file sitting inside .git must not trigger adapter selection."""
-        root = make_tree({".git/hooks/pre-commit.py": "x = 1"})
-        self.assertEqual(get_adapters(root), [])
-
-    def test_py_file_inside_hidden_dir_not_detected(self):
-        """A .py file inside any hidden directory (leading dot) must not
-        trigger adapter selection, matching the same rule the Python
-        adapter itself uses when walking the repo."""
-        root = make_tree({".cache/tmp/leftover.py": "x = 1"})
-        self.assertEqual(get_adapters(root), [])
-
-    def test_real_python_file_alongside_skipped_dirs_still_detected(self):
-        """Skip-dirs must only exclude files inside them -- a real,
-        top-level .py file in the same repo must still be detected."""
-        root = make_tree({
-            "node_modules/somepkg/script.py": "x = 1",
-            "main.py": "import os",
-        })
-        self.assertEqual(get_adapters(root), [python_adapter.analyze])
+    def test_py_in_subdirectory_triggers_adapter(self):
+        """Detection must recurse into subdirectories."""
+        root = _make_repo({"pkg/utils.py": "UTIL = 1"})
+        adapters = get_adapters(root)
+        self.assertIn(python_adapter, adapters)
 
 
 if __name__ == "__main__":

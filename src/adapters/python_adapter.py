@@ -335,6 +335,20 @@ def get_blast_radius(graph: nx.DiGraph, file_path: str) -> dict:
 # Adapter interface implementation
 # ---------------------------------------------------------------------------
 
+def discovered_files(repo_path: str) -> list[str]:
+    """
+    Return every .py file found under repo_path as a list of relative
+    forward-slash paths.
+
+    Wraps _iter_python_files so the scanner can ask "which files should I
+    track?" independently of "what edges exist?".  Isolated files — files
+    that import nothing and are imported by nothing — have no edges in the
+    output of analyze(), but must still appear here so the Evidence Store
+    records them.
+    """
+    return list(_iter_python_files(os.path.abspath(repo_path)))
+
+
 def analyze(repo_path: str) -> list[EdgeTuple]:
     """
     Adapter entry point: walk repo_path, parse all Python files, and return

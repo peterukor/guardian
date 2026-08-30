@@ -27,6 +27,7 @@ from src.git_history import (
     fetch_file_commits,
     get_file_history,
     get_last_touch,
+    get_repo_state,
     is_bug_fix_commit,
 )
 
@@ -530,6 +531,87 @@ class TestGitIntegration(unittest.TestCase):
         # The most recent commit is commits[0] (newest-first).
         self.assertEqual(history.last_touch_commit, commits[0].hash)
         self.assertEqual(history.last_touch_date, commits[0].date)
+
+
+# ---------------------------------------------------------------------------
+# get_repo_state integration tests (real temporary repos)
+# ---------------------------------------------------------------------------
+
+class TestGetRepoState(unittest.TestCase):
+    """
+    Tests for get_repo_state(repo_root) using real temporary git repos.
+    Each test creates and cleans up its own isolated repo.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        _setup_repo(self.tmp)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_returns_tuple_of_two(self):
+        """get_repo_state must return a 2-tuple."""
+        _write(self.tmp, "f.py", "x=1")
+        _git(self.tmp, "add", "f.py")
+        _git(self.tmp, "commit", "-m", "init")
+        result = get_repo_state(self.tmp)
+        self.assertIsInstance(result, tuple)
+        self.assertEqual(len(result), 2)
+
+    def test_commit_hash_is_full_sha(self):
+        """The first element must be a 40-character hexadecimal SHA string."""
+        _write(self.tmp, "f.py", "x=1")
+        _git(self.tmp, "add", "f.py")
+        _git(self.tmp, "commit", "-m", "init")
+        commit_hash, _ = get_repo_state(self.tmp)
+        self.assertIsNotNone(commit_hash)
+        self.assertRegex(commit_hash, r"^[0-9a-f]{40}$")
+
+    def test_branch_name_matches_current_branch(self):
+        """The second element must be the currently checked-out branch name."""
+        _write(self.tmp, "f.py", "x=1")
+        _git(self.tmp, "add", "f.py")
+        _git(self.tmp, "commit", "-m", "init")
+        _, branch = get_repo_state(self.tmp)
+        self.assertIsNotNone(branch)
+        # git init creates 'master' or 'main' depending on git config; accept either.
+        self.assertIn(branch, ("master", "main"))
+
+    def test_hash_matches_git_rev_parse(self):
+        """The returned hash must equal what `git rev-parse HEAD` produces."""
+        import subprocess as sp
+        _write(self.tmp, "f.py", "x=1")
+        _git(self.tmp, "add", "f.py")
+        _git(self.tmp, "commit", "-m", "init")
+        commit_hash, _ = get_repo_state(self.tmp)
+        expected = sp.run(
+            ["git", "-C", self.tmp, "rev-parse", "HEAD"],
+            capture_output=True, text=True,
+        ).stdout.strip()
+        self.assertEqual(commit_hash, expected)
+
+    def test_hash_changes_after_new_commit(self):
+        """The returned hash must reflect HEAD at call time, not a stale cache."""
+        _write(self.tmp, "f.py", "v1")
+        _git(self.tmp, "add", "f.py")
+        _git(self.tmp, "commit", "-m", "first")
+        hash1, _ = get_repo_state(self.tmp)
+
+        _write(self.tmp, "f.py", "v2")
+        _git(self.tmp, "add", "f.py")
+        _git(self.tmp, "commit", "-m", "second")
+        hash2, _ = get_repo_state(self.tmp)
+
+        self.assertNotEqual(hash1, hash2)
+
+    def test_no_commits_returns_none_none(self):
+        """A repo with no commits yet must return (None, None), not raise."""
+        # Fresh repo, nothing committed.
+        commit_hash, branch = get_repo_state(self.tmp)
+        self.assertIsNone(commit_hash)
+        self.assertIsNone(branch)
 
 
 if __name__ == "__main__":
