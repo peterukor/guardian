@@ -21,6 +21,8 @@ can dispatch by name without a large if/elif chain.
 
 from __future__ import annotations
 
+from typing import Callable
+
 from src.adapters.python_adapter import get_blast_radius
 from src.evidence_store import EvidenceStore
 from src.git_history import get_changed_files
@@ -74,14 +76,28 @@ def get_file_blast_radius(db_path: str, file_path: str) -> dict:
     """
     Return the blast radius for file_path using the stored dependency graph.
 
+    Checks that file_path has an actual evidence record before computing
+    blast radius — a file never scanned would otherwise silently produce
+    the same {"total": 0, ...} shape as a file genuinely confirmed to have
+    zero dependents, which is exactly the kind of stale/absent-evidence
+    ambiguity Guardian must never present as a real result.
+
     Loads the full graph from the Evidence Store via build_graph() (no
     re-parsing of source files) and delegates to the existing get_blast_radius
     implementation so the calculation is identical to what the CLI shows.
 
-    Returns counts and sorted file lists for direct and indirect dependents.
+    Returns a dict with an "error" key if the file has no evidence, or the
+    normal blast-radius dict (counts and sorted file lists) otherwise.
     """
     store = EvidenceStore(db_path)
     try:
+        rec = store.get_file(file_path)
+        if rec is None:
+            return {
+                "error": f"No evidence found for '{file_path}'. "
+                         "Run 'guardian scan' first.",
+                "file_path": file_path,
+            }
         graph = store.build_graph()
     finally:
         store.close()
@@ -207,9 +223,19 @@ TOOLS: list[dict] = [
     },
 ]
 
-# TO-DO
+# TODO (post-PoC, not now): db_path/repo_path should not be tool arguments
+# the model has to supply. The runtime always knows which repo/Evidence Store
+# it's operating on — asking the model to produce a correct filesystem path
+# as a string is unnecessary risk (hallucinated/stale/malformed paths fail as
+# opaque tool errors, indistinguishable from the model being wrong). Fix:
+# bind db_path/repo_path via functools.partial (or a closure) when building
+# this dict for a given request, so the exposed tool schema only takes
+# file_path/ref1/ref2 — no infra params at all. Not worth doing yet — this
+# changes the tool schema itself, and right now we only want to prove the
+# tool-calling loop works at all, one variable at a time.
+#
 # Maps tool name → callable.  The loop calls TOOL_FUNCTIONS[name](**args).
-TOOL_FUNCTIONS: dict[str, object] = {
+TOOL_FUNCTIONS: dict[str, Callable] = {
     "get_file_evidence": get_file_evidence,
     "get_file_blast_radius": get_file_blast_radius,
     "get_diff_files": get_diff_files,

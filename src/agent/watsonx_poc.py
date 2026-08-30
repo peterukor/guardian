@@ -1,6 +1,6 @@
 """
 watsonx PoC — proves IBM watsonx.ai native tool-calling works before the
-real Agent loop is built against it.
+real Agent loop is trusted against it.
 
 What this file demonstrates
 ----------------------------
@@ -8,14 +8,15 @@ What this file demonstrates
    function-calling schema.
 2. The model can respond with finish_reason == "tool_calls" instead of
    "stop", signalling it wants a tool executed.
-3. We execute the tool, append a "tool" role message with the result, and
-   re-send the conversation.
-4. The model receives the tool result and produces a final natural-language
-   response (finish_reason == "stop").
+3. run_agent_loop() (src/agent/loop.py) drives this end to end: it keeps
+   calling the model, executing whatever tools are requested, and feeding
+   results back, for as many rounds as the model actually needs — not a
+   fixed two-step script. This is what actually proves multi-round
+   tool-calling works, since the model may request a second tool only
+   after seeing the first tool's result.
 
-This is the minimal multi-step loop the real Agent loop must support.
-It is isolated from Guardian's scanner and CLI — it only uses one Guardian
-tool (get_diff_files) with a real temp repo to keep the demo grounded.
+This is isolated from Guardian's scanner and CLI — it only uses Guardian's
+own tools (get_diff_files) with a real temp repo to keep the demo grounded.
 
 Running
 -------
@@ -32,11 +33,14 @@ error rather than pretending the interaction succeeded.
 
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import sys
 import tempfile
+
+from dotenv import load_dotenv
+
+load_dotenv()  # reads .env into os.environ if present; no-op if it doesn't exist
 
 
 # ---------------------------------------------------------------------------
@@ -93,43 +97,14 @@ def _make_demo_repo() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tool execution helper (identical logic to what loop.py will use)
-# ---------------------------------------------------------------------------
-
-def _execute_tool(tool_call: dict, repo_path: str) -> str:
-    """
-    Execute a single tool call and return the result as a JSON string.
-
-    tool_call follows the OpenAI/watsonx tool_calls item shape:
-        {"id": ..., "type": "function", "function": {"name": ..., "arguments": ...}}
-    """
-    from src.agent.tools import TOOL_FUNCTIONS
-
-    name = tool_call["function"]["name"]
-    args = json.loads(tool_call["function"]["arguments"])
-
-    # Inject repo_path for get_diff_files if the model omitted it or used a
-    # placeholder — keeps the PoC working without the model guessing a real path.
-    if name == "get_diff_files" and not args.get("repo_path"):
-        args["repo_path"] = repo_path
-
-    fn = TOOL_FUNCTIONS.get(name)
-    if fn is None:
-        return json.dumps({"error": f"Unknown tool: {name}"})
-    return json.dumps(fn(**args))
-
-
-# ---------------------------------------------------------------------------
 # Main PoC flow
 # ---------------------------------------------------------------------------
 
 def run_poc() -> None:
     """
-    Execute the full multi-step tool-calling demonstration with watsonx.
-
-    Step 1: send user question + tools to the model.
-    Step 2: model requests get_diff_files tool → execute it.
-    Step 3: send tool result back → model produces final text response.
+    Drive the real Agent loop against watsonx to prove multi-round
+    tool-calling works end to end — the loop, not a hand-rolled script,
+    decides how many rounds are needed based on the model's actual behavior.
     """
     api_key    = _require_env("WATSONX_API_KEY")
     url        = _require_env("WATSONX_URL")
@@ -137,7 +112,8 @@ def run_poc() -> None:
 
     from ibm_watsonx_ai import Credentials
     from ibm_watsonx_ai.foundation_models import ModelInference
-    from src.agent.tools import TOOLS
+    from src.agent.tools import TOOLS, TOOL_FUNCTIONS
+    from src.agent.loop import run_agent_loop
 
     repo_path = _make_demo_repo()
     print(f"[PoC] Demo repo: {repo_path}")
@@ -148,58 +124,35 @@ def run_poc() -> None:
         project_id=project_id,
     )
 
-    messages: list[dict] = [
+    def chat_fn(messages: list[dict], tools: list[dict]) -> dict:
+        """Adapts ModelInference.chat() to the loop's provider-agnostic shape."""
+        return model.chat(messages=messages, tools=tools)
+
+    messages = [
         {
             "role": "system",
             "content": (
                 "You are Guardian, a code-change risk analyst. "
                 "Use the available tools to answer the user's question. "
-                "Do not guess — call the tools to get real data."
+                "Do not guess — call the tools to get real data. "
+                f"The repository path is '{repo_path}'."
             ),
         },
         {
             "role": "user",
             "content": (
                 f"What files changed between HEAD~1 and HEAD in the repo at "
-                f"'{repo_path}'?"
+                f"'{repo_path}'? For each changed file, also check if it has "
+                "any known blast radius."
             ),
         },
     ]
 
-    print("\n[PoC] Step 1 — sending initial message to model ...")
-    response = model.chat(messages=messages, tools=TOOLS)
-    choice = response["choices"][0]
-    print(f"  finish_reason: {choice['finish_reason']}")
+    print("\n[PoC] Running the real Agent loop (as many rounds as the model needs) ...")
+    final_response = run_agent_loop(chat_fn, messages, TOOLS, TOOL_FUNCTIONS)
 
-    if choice["finish_reason"] != "tool_calls":
-        print("[PoC] Model did not request a tool call — PoC cannot demonstrate multi-step flow.")
-        print("  Final response:", choice["message"].get("content"))
-        return
-
-    # Append the assistant's tool-call message to the conversation.
-    messages.append(choice["message"])
-
-    for tc in choice["message"]["tool_calls"]:
-        name = tc["function"]["name"]
-        print(f"\n[PoC] Step 2 — model requested tool: {name}")
-        print(f"  arguments: {tc['function']['arguments']}")
-
-        result = _execute_tool(tc, repo_path)
-        print(f"  result: {result}")
-
-        # Tool result message — role "tool" with matching tool_call_id.
-        messages.append({
-            "role": "tool",
-            "tool_call_id": tc["id"],
-            "content": result,
-        })
-
-    print("\n[PoC] Step 3 — sending tool results back to model ...")
-    response2 = model.chat(messages=messages, tools=TOOLS)
-    choice2 = response2["choices"][0]
-    print(f"  finish_reason: {choice2['finish_reason']}")
-    print(f"\n[PoC] Final model response:\n  {choice2['message']['content']}")
-    print("\n[PoC] SUCCESS — multi-step tool-calling flow verified.")
+    print(f"\n[PoC] Final model response:\n  {final_response}")
+    print("\n[PoC] SUCCESS — run_agent_loop completed a real multi-round tool-calling flow.")
 
 
 if __name__ == "__main__":
