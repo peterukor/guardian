@@ -125,6 +125,47 @@ class TestScanMeta(unittest.TestCase):
         meta = store.get_scan_meta()
         self.assertIsNotNone(meta)
 
+    def test_scan_meta_no_commits_stores_null_not_empty_string(self):
+        """
+        Regression: scanning a repo with no commits must store NULL in
+        last_scan_commit_hash and branch, not empty strings.
+        get_scan_meta() must return None for both fields — empty strings
+        would silently break any future incremental-scan logic that relies
+        on those fields being None to signal "never meaningfully scanned".
+        """
+        tmp = tempfile.mkdtemp()
+        _setup_repo(tmp)
+        store = _make_store()
+        _run_scan(tmp, store)
+        meta = store.get_scan_meta()
+        self.assertIsNotNone(meta)
+        self.assertIsNone(
+            meta.last_scan_commit_hash,
+            "last_scan_commit_hash must be None (NULL), not an empty string",
+        )
+        self.assertIsNone(
+            meta.branch,
+            "branch must be None (NULL), not an empty string",
+        )
+
+    def test_scan_meta_with_commits_stores_real_values(self):
+        """
+        Non-regression: for a repo that has commits, the real commit hash and
+        branch name must still be stored and returned correctly after the fix.
+        """
+        repo = _make_committed_repo({"app.py": "x = 1\n"})
+        store = _make_store()
+        _run_scan(repo, store)
+        meta = store.get_scan_meta()
+        self.assertIsNotNone(meta)
+        # Hash must be a real 40-char SHA, not None and not empty.
+        self.assertIsNotNone(meta.last_scan_commit_hash)
+        self.assertNotEqual(meta.last_scan_commit_hash, "")
+        self.assertRegex(meta.last_scan_commit_hash, r"^[0-9a-f]{40}$")
+        # Branch must be a non-empty string.
+        self.assertIsNotNone(meta.branch)
+        self.assertNotEqual(meta.branch, "")
+
 
 # ---------------------------------------------------------------------------
 # TestFileRecords — files table population

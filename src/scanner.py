@@ -201,8 +201,8 @@ def _run_scan(repo_path: str, store: EvidenceStore) -> ScanResult:
     # Step 8: persist scan_meta — always, even when no adapters matched
     # ------------------------------------------------------------------
     store.set_scan_meta(
-        commit_hash=commit_hash or "",
-        branch=branch or "",
+        commit_hash=commit_hash,
+        branch=branch,
     )
 
     return ScanResult(
