@@ -146,11 +146,17 @@ def generate_agent_findings(
     from ibm_watsonx_ai import Credentials
     from ibm_watsonx_ai.foundation_models import ModelInference
 
-    model = ModelInference(
-        model_id="ibm/granite-3-8b-instruct",
-        credentials=Credentials(api_key=api_key, url=url),
-        project_id=project_id,
-    )
+    try:
+        model = ModelInference(
+            model_id="ibm/granite-3-8b-instruct",
+            credentials=Credentials(api_key=api_key, url=url),
+            project_id=project_id,
+        )
+    except Exception as exc:
+        return AgentResult(
+            available=False,
+            error=f"Agent unavailable — could not initialize watsonx client: {exc}",
+        )
 
     def chat_fn(messages: list[dict], tools: list[dict]) -> dict:
         return model.chat(messages=messages, tools=tools)
