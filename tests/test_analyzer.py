@@ -60,10 +60,11 @@ class TestExtractImports(unittest.TestCase):
         self.assertIn(("os.path", 0), result)
 
     def test_from_import_absolute(self):
-        """from src import analyzer records both the compound and parent names."""
+        """from src import analyzer records only the compound name, not the parent.
+        The parent is only used as a fallback during resolution, not extraction."""
         result = _extract_imports("from src import analyzer")
         self.assertIn(("src.analyzer", 0), result)
-        self.assertIn(("src", 0), result)
+        self.assertNotIn(("src", 0), result)
 
     def test_from_import_relative_single_dot(self):
         """from .utils import helper -> ('utils', 1)"""
@@ -83,11 +84,12 @@ class TestExtractImports(unittest.TestCase):
     def test_bare_relative_dot_only(self):
         """
         `from . import something` -- ast gives module=None, level=1.
-        The analyzer cannot statically determine whether `something` is a
-        module or a symbol, so it records (None, 1) and skips resolution.
+        Each name in node.names is treated as a module candidate and recorded
+        as (name, level) so resolution can find it as a sibling file.
         """
         result = _extract_imports("from . import something")
-        self.assertIn((None, 1), result)
+        self.assertIn(("something", 1), result)
+        self.assertNotIn((None, 1), result)
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +153,102 @@ class TestAbsoluteImportResolution(unittest.TestCase):
         root = make_repo({"main.py": ""})
         result = _resolve_module("requests", root)
         self.assertIsNone(result)
+
+
+# ---------------------------------------------------------------------------
+# from pkg import mod — single edge, no duplicates (Fix 2)
+# ---------------------------------------------------------------------------
+
+class TestFromPkgImportMod(unittest.TestCase):
+
+    def test_single_edge_when_both_mod_and_init_exist(self):
+        """
+        `from pkg import mod` where pkg/mod.py AND pkg/__init__.py both exist
+        must produce exactly ONE edge — to pkg/mod.py (the more specific file),
+        not two edges. This was the duplicate-edge bug.
+        """
+        root = make_repo({
+            "pkg/__init__.py": "# package",
+            "pkg/mod.py": "VALUE = 1",
+            "main.py": "from pkg import mod",
+        })
+        g = build_dependency_graph(root)
+        pairs = edges_as_pairs(g)
+        # Edge to the submodule must exist.
+        self.assertIn(("main.py", "pkg/mod.py"), pairs)
+        # Edge to __init__.py must NOT also exist — that would be a duplicate.
+        self.assertNotIn(("main.py", "pkg/__init__.py"), pairs)
+
+    def test_falls_back_to_init_when_only_symbol(self):
+        """
+        `from pkg import SomeClass` where pkg/SomeClass.py does NOT exist but
+        pkg/__init__.py does — the fallback must produce an edge to __init__.py,
+        since that's where the symbol is defined.
+        """
+        root = make_repo({
+            "pkg/__init__.py": "class SomeClass: pass",
+            "main.py": "from pkg import SomeClass",
+        })
+        g = build_dependency_graph(root)
+        pairs = edges_as_pairs(g)
+        self.assertIn(("main.py", "pkg/__init__.py"), pairs)
+
+    def test_no_edge_when_fully_external(self):
+        """
+        `from os import path` — os is not in the repo, so no edge at all.
+        """
+        root = make_repo({"main.py": "from os import path"})
+        g = build_dependency_graph(root)
+        self.assertEqual(list(g.edges()), [])
+
+
+# ---------------------------------------------------------------------------
+# from . import module — bare relative (Fix 1)
+# ---------------------------------------------------------------------------
+
+class TestBareRelativeImport(unittest.TestCase):
+
+    def setUp(self):
+        """
+        Repo layout:
+            pkg/__init__.py
+            pkg/utils.py
+            pkg/core.py   <- `from . import utils` (bare relative, module=None)
+        """
+        self.root = make_repo({
+            "pkg/__init__.py": "",
+            "pkg/utils.py": "UTIL = 1",
+            "pkg/core.py": "from . import utils",
+        })
+
+    def test_bare_relative_produces_edge(self):
+        """`from . import utils` must create an edge to pkg/utils.py."""
+        g = build_dependency_graph(self.root)
+        pairs = edges_as_pairs(g)
+        self.assertIn(("pkg/core.py", "pkg/utils.py"), pairs)
+
+    def test_bare_relative_multiple_names(self):
+        """`from . import utils, helpers` must create edges to both sibling files."""
+        root = make_repo({
+            "pkg/__init__.py": "",
+            "pkg/utils.py": "",
+            "pkg/helpers.py": "",
+            "pkg/core.py": "from . import utils, helpers",
+        })
+        g = build_dependency_graph(root)
+        pairs = edges_as_pairs(g)
+        self.assertIn(("pkg/core.py", "pkg/utils.py"), pairs)
+        self.assertIn(("pkg/core.py", "pkg/helpers.py"), pairs)
+
+    def test_bare_relative_nonexistent_name_produces_no_edge(self):
+        """`from . import nonexistent` must not create a phantom edge."""
+        root = make_repo({
+            "pkg/__init__.py": "",
+            "pkg/core.py": "from . import nonexistent",
+        })
+        g = build_dependency_graph(root)
+        # core.py is a node but has no resolvable edges.
+        self.assertEqual(list(g.edges()), [])
 
 
 # ---------------------------------------------------------------------------

@@ -170,18 +170,25 @@ def _extract_imports(source_code: str) -> list[tuple[str | None, int]]:
         elif isinstance(node, ast.ImportFrom):
             level = node.level  # number of leading dots
             if level == 0:
-                # Absolute: `from guardian import analyzer` -> "guardian.analyzer"
+                # Absolute `from pkg import X` — record only the compound name
+                # "pkg.X". If X is a submodule, "pkg/X.py" resolves directly.
+                # If X is a symbol (class/function), "pkg/X.py" won't exist and
+                # the resolution step falls back to "pkg/__init__.py" at that
+                # point — we don't emit the fallback here to avoid duplicate edges.
                 if node.module:
                     for alias in node.names:
-                        full_name = f"{node.module}.{alias.name}"
-                        results.append((full_name, 0))
-                        # Also record the parent module in case the symbol is
-                        # actually the module itself (common pattern).
-                        results.append((node.module, 0))
+                        results.append((f"{node.module}.{alias.name}", 0))
             else:
-                # Relative: resolve against the source file's package.
-                # Record the module portion (may be None for bare `from .`).
-                results.append((node.module, level))
+                # Relative import. When node.module is not None, e.g.
+                # `from .utils import X`, we record ("utils", level) and
+                # _resolve_relative_import handles the path lookup.
+                # When node.module IS None, e.g. `from . import utils`,
+                # each name in node.names is itself a module — record each one.
+                if node.module is not None:
+                    results.append((node.module, level))
+                else:
+                    for alias in node.names:
+                        results.append((alias.name, level))
 
     return results
 
@@ -226,6 +233,13 @@ def build_dependency_graph(repo_root: str) -> nx.DiGraph:
                 if module_name is None:
                     continue
                 target = _resolve_module(module_name, root)
+                # If "pkg.X" didn't resolve to a file, X is likely a symbol
+                # (class, function, constant) defined in the package's __init__.
+                # Fall back to the parent package so we still record the real
+                # file dependency rather than dropping the edge entirely.
+                if target is None and "." in module_name:
+                    parent = module_name.rsplit(".", 1)[0]
+                    target = _resolve_module(parent, root)
             else:
                 target = _resolve_relative_import(module_name, level, rel_path, root)
 
