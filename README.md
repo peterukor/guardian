@@ -31,8 +31,9 @@ Change Passport
 - **AI Agent** — investigates evidence and produces important findings and recommended checks.
 - **Change Passport** — presents the resulting risk assessment and findings.
 - **Prediction Log** — persists deterministic risk predictions for future outcome tracking.
+- **Works without AI** — if watsonx credentials aren't configured, every deterministic feature above still works. Only the AI findings/checks section is skipped.
 
-## Usage
+## Setup
 
 Install dependencies:
 
@@ -40,37 +41,84 @@ Install dependencies:
 pip install -r requirements.txt
 ```
 
-Scan a repository:
+### AI Agent (optional)
+
+The AI findings/checks feature needs IBM watsonx.ai credentials. Everything else in Guardian works without this step.
+
+1. Copy the example env file:
+   ```bash
+   cp env.example .env
+   ```
+2. Open `.env` and fill in your real values:
+   ```
+   WATSONX_API_KEY=your-ibm-cloud-api-key
+   WATSONX_URL=https://us-south.ml.cloud.ibm.com
+   WATSONX_PROJECT_ID=your-watsonx-project-id
+   ```
+   Get these from [IBM watsonx.ai](https://dataplatform.cloud.ibm.com) — the API key from "Manage IBM Cloud API keys," and the Project ID from your project's "Developer access" panel.
+3. `.env` is gitignored — never commit real credentials.
+
+If `.env` is missing or incomplete, `guardian analyze` still runs normally; the "Important findings" and "Recommended checks" sections will just say the Agent is unavailable.
+
+## Usage
+
+All commands are run as a Python module from the repository root:
 
 ```bash
-guardian scan ./my-repo
+python3 -m src.cli <command> ...
 ```
 
-Analyze a Git change:
+**Scan a repository** (required once, before analyzing):
 
 ```bash
-guardian analyze ./my-repo --diff HEAD~1..HEAD
+python3 -m src.cli scan .
 ```
 
-Analyze specific files:
+**Analyze a Git diff:**
 
 ```bash
-guardian analyze ./my-repo --files src/payment.py
+python3 -m src.cli analyze . --diff HEAD~1..HEAD
 ```
 
-Get JSON output:
+**Analyze specific files:**
 
 ```bash
-guardian analyze ./my-repo --diff HEAD~1..HEAD --json
+python3 -m src.cli analyze . --files src/payment.py
 ```
 
-The default Evidence Store is:
+**Quick mode — file names and risk scores only, no AI call:**
+
+```bash
+python3 -m src.cli analyze . --diff HEAD~1..HEAD --file-name
+```
+
+**Show more (or fewer) files in full detail** (default: top 3 riskiest):
+
+```bash
+python3 -m src.cli analyze . --diff HEAD~1..HEAD -n 10
+```
+
+**JSON output** (for scripts/tooling):
+
+```bash
+python3 -m src.cli analyze . --diff HEAD~1..HEAD --json
+```
+
+Full flag reference:
+
+```bash
+python3 -m src.cli --help
+python3 -m src.cli scan --help
+python3 -m src.cli analyze --help
+```
+
+The default scan database is:
 
 ```text
 <repo>/.guardian/guardian.db
 ```
 
-Use `--db` to provide a custom database path.
+Use `--db` on either command to use a custom path.
 
 ## Architecture
 
@@ -81,7 +129,6 @@ src/
 ├── cli/            # CLI parsing, commands, passports, rendering
 ├── evidence_store/ # SQLite persistence
 ├── git_history/    # Git history analysis
-├── analyzer.py
 ├── risk_scorer.py
 └── scanner.py
 ```
@@ -109,13 +156,13 @@ Agent tests use mocks and do not require live watsonx credentials.
 - SQLite Evidence Store
 - Agent tool-calling loop
 - Agent → Change Passport integration
-- CLI scan/analyze workflow
-- JSON output
+- CLI scan/analyze workflow with JSON, quick-list, and top-N detail modes
 - Prediction Log persistence
+- Full functionality without AI credentials configured
 
 ### Future
 
-Additional language adapters, richer repository signals, prediction outcome tracking, and an optional web frontend.
+Additional language adapters, richer repository signals, prediction outcome tracking, a `--verbose` flag for full risk-factor detail, and an optional web frontend.
 
 ## License
 
