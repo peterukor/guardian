@@ -84,6 +84,13 @@ class ChangePassport:
     repo_path: str
     ref_range: str | None              # e.g. "HEAD~1..HEAD"; None for --files
     files: list[FilePassport] = field(default_factory=list)
+    # Agent runs once per whole call, not per file -- these live at batch
+    # level, not on FilePassport. agent_available=False means the section
+    # must render as unavailable, never fabricated.
+    agent_available: bool = False
+    agent_findings: list[str] = field(default_factory=list)
+    agent_checks: list[str] = field(default_factory=list)
+    agent_error: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -223,7 +230,9 @@ def _render_text(passport: ChangePassport) -> str:
     Render a ChangePassport as the human-readable format specified in AGENTS.md.
 
     One block per changed file.  Files with no evidence get an explicit
-    'Evidence unavailable' notice rather than zeros.
+    'Evidence unavailable' notice rather than zeros.  Agent findings/checks
+    are rendered once, after all file blocks, since the Agent runs once per
+    call over the whole changed-file set -- not once per file.
     """
     lines: list[str] = []
     for fp in passport.files:
@@ -251,12 +260,22 @@ def _render_text(passport: ChangePassport) -> str:
         lines.append(f"  Top author concentration: {top_pct * 100:.0f}%")
         last = fp.last_touch_date if fp.last_touch_date else "unknown"
         lines.append(f"  Last touch: {last}")
-        lines.append("")
-        lines.append("Important findings:")
-        lines.append("  [Agent not yet implemented]")
-        lines.append("")
-        lines.append("Recommended checks:")
-        lines.append("  [Agent not yet implemented]")
+
+    lines.append("")
+    lines.append("Important findings:")
+    if passport.agent_available:
+        for finding in passport.agent_findings:
+            lines.append(f"  - {finding}")
+    else:
+        lines.append(f"  [Agent unavailable — {passport.agent_error or 'unknown reason'}]")
+
+    lines.append("")
+    lines.append("Recommended checks:")
+    if passport.agent_available:
+        for check in passport.agent_checks:
+            lines.append(f"  - {check}")
+    else:
+        lines.append(f"  [Agent unavailable — {passport.agent_error or 'unknown reason'}]")
 
     return "\n".join(lines)
 
@@ -339,6 +358,15 @@ def _cmd_analyze(args: argparse.Namespace) -> None:
         return
 
     passport = _build_passport(repo_path, changed, ref_range, db_path)
+
+    # Agent runs once for the whole batch of changed files -- never per file,
+    # and never blocks the deterministic passport above from being shown.
+    from src.agent.integration import generate_agent_findings
+    agent_result = generate_agent_findings(repo_path, db_path, changed)
+    passport.agent_available = agent_result.available
+    passport.agent_findings = agent_result.findings
+    passport.agent_checks = agent_result.checks
+    passport.agent_error = agent_result.error
 
     if args.json:
         print(_render_json(passport))

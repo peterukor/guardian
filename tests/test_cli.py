@@ -57,7 +57,7 @@ class TestCLI(unittest.TestCase):
         self.assertIn("GUARDIAN CHANGE PASSPORT", r.stdout)
         self.assertIn("Risk:", r.stdout)
         self.assertIn("Blast radius:", r.stdout)
-        self.assertIn("[Agent not yet implemented]", r.stdout)
+        self.assertIn("[Agent unavailable", r.stdout)
 
     def test_analyze_json(self):
         r = _run("analyze", self.tmp, "--diff", "HEAD~1..HEAD", "--db", self.db, "--json")
