@@ -49,7 +49,7 @@ _SUBMIT_FINDINGS_TOOL = {
                 "findings": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Short, evidence-based findings, one per file or theme.",
+                    "description": "Exactly one 1-2 sentence overall summary across the whole batch.",
                 },
                 "checks": {
                     "type": "array",
@@ -131,21 +131,24 @@ def _build_messages(
         "never a section header, transition phrase (e.g. 'Checks to perform:'), "
         "or numbering. Write plain text only, no markdown (no **, no numbered "
         "lists) — the CLI renders these as plain strings, not formatted text.\n\n"
-        "Findings: write in natural, flowing prose, like briefing a colleague — "
-        "not terse bullet fragments. Combine related facts into complete "
-        "sentences (e.g. 'The file was newly added with a low risk score of "
-        "2.22 and no dependents, so the blast radius is minimal' rather than "
-        "three separate fragments for the same file). Be concise — one to "
-        "three sentences per finding is plenty. State only what the evidence "
-        "actually shows.\n\n"
-        "Checks: only recommend a check if something SPECIFIC about this file's "
-        "evidence justifies it — e.g. high blast radius means verify dependents, "
-        "high bug-fix count means check for a recurring root cause, low ownership "
-        "means get a second reviewer. Do not list generic best practices (write "
-        "tests, run a linter, update docs, get a code review) that would apply to "
-        "any change regardless of its evidence — those aren't Guardian's job to "
-        "say. If nothing in the evidence justifies a specific check, return an "
-        "empty checks list. An empty list is a correct answer, not a failure."
+        "Findings: return exactly ONE overall finding — a 1-2 sentence "
+        "summary covering the WHOLE batch of changed files, not one per "
+        "file. Prioritize mentioning the highest-risk file(s) and the most "
+        "important pattern across the batch. Keep it short and scannable — "
+        "1-2 sentences total, never a paragraph per file. State only what "
+        "the evidence actually shows.\n\n"
+        "Checks: recommend AT MOST 3 checks total, even if more could "
+        "technically be justified — prioritize and pick only the most "
+        "critical ones. Only recommend a check if something SPECIFIC about "
+        "this file's evidence justifies it — e.g. high blast radius means "
+        "verify dependents, high bug-fix count means check for a recurring "
+        "root cause, low ownership means get a second reviewer. Do not list "
+        "generic best practices (write tests, run a linter, update docs, "
+        "get a code review) that would apply to any change regardless of "
+        "its evidence — those aren't Guardian's job to say and must never "
+        "be invented. If nothing in the evidence justifies a specific "
+        "check, return an empty checks list. An empty list is a correct "
+        "answer, not a failure."
     )
     user = f"Changed files:\n{files_summary}\n\nProvide findings and recommended checks."
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
@@ -252,7 +255,10 @@ def _run_with_chat_fn(
     return AgentResult(
         available=True,
         findings=list(parsed.get("findings", [])),
-        checks=list(parsed.get("checks", [])),
+        # Hard cap, not just a prompt instruction -- never trust the model
+        # alone to obey a numeric limit given how often it's ignored other
+        # formatting instructions in testing.
+        checks=list(parsed.get("checks", []))[:3],
     )
 
 
@@ -290,6 +296,6 @@ def generate_agent_findings(
         )
 
     def chat_fn(messages: list[dict], tools: list[dict]) -> dict:
-        return model.chat(messages=messages, tools=tools, params={"max_tokens": 1024})
+        return model.chat(messages=messages, tools=tools, params={"max_tokens": 2048})
 
     return _run_with_chat_fn(chat_fn, repo_path, db_path, changed_files)

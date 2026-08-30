@@ -31,6 +31,12 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--files", nargs="+", metavar="FILE", help="Explicit file list.")
     analyze_p.add_argument("--db", metavar="PATH", help="Evidence Store path (default: <repo>/.guardian/guardian.db).")
     analyze_p.add_argument("--json", action="store_true", help="Output as JSON.")
+    analyze_p.add_argument(
+        "--file-name",
+        action="store_true",
+        help="Print only changed file names and risk scores. Skips the "
+             "Agent entirely -- nothing is sent to the AI.",
+    )
 
     return parser
 

@@ -12,7 +12,7 @@ import sys
 from src.cli.builder import build_passport, record_predictions
 from src.cli.passport import default_db
 from src.cli.preflight import die, preflight
-from src.cli.render import render_json, render_text
+from src.cli.render import render_file_names, render_json, render_text
 from src.git_history import get_changed_files
 from src.scanner import run_scan
 
@@ -85,6 +85,11 @@ def cmd_analyze(args: argparse.Namespace) -> None:
         return
 
     passport = build_passport(repo_path, changed, ref_range, db_path)
+
+    if args.file_name:
+        # Risk scores are deterministic -- no AI needed here at all.
+        print(render_file_names(passport))
+        return
 
     # Agent runs once for the whole batch of changed files -- never per file,
     # and never blocks the deterministic passport above from being shown.
