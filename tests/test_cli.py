@@ -12,6 +12,8 @@ import sys
 import tempfile
 import unittest
 
+from src.evidence_store import EvidenceStore
+
 
 def _run(*args: str, cwd: str | None = None) -> subprocess.CompletedProcess:
     """Run guardian as a module via the current Python interpreter."""
@@ -82,6 +84,45 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("Evidence unavailable", r.stdout)
         self.assertNotIn("Blast radius:", r.stdout)
+
+
+    def test_analyze_records_predictions_matching_shown_risk(self):
+        r = _run("analyze", self.tmp, "--diff", "HEAD~1..HEAD", "--db", self.db)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        store = EvidenceStore(self.db)
+        try:
+            invocation_id = r.stderr.strip().split()[-1]
+            preds = store.get_predictions_for_invocation(invocation_id)
+            self.assertEqual(len(preds), 1)
+            self.assertEqual(preds[0].file_path, "a.py")
+            self.assertIn(f"{preds[0].risk_score:.1f}/10", r.stdout)
+        finally:
+            store.close()
+
+    def test_deleted_file_gets_no_prediction_recorded(self):
+        subprocess.run(["git", "-C", self.tmp, "rm", "b.py"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", self.tmp, "commit", "-m", "delete b"], check=True, capture_output=True)
+        r = _run("analyze", self.tmp, "--diff", "HEAD~1..HEAD", "--db", self.db)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        store = EvidenceStore(self.db)
+        try:
+            invocation_id = r.stderr.strip().split()[-1]
+            preds = store.get_predictions_for_invocation(invocation_id)
+            self.assertEqual(preds, [])  # b.py had no evidence -- nothing recorded
+        finally:
+            store.close()
+
+    def test_agent_unavailable_records_none_not_empty_findings(self):
+        r = _run("analyze", self.tmp, "--diff", "HEAD~1..HEAD", "--db", self.db)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        store = EvidenceStore(self.db)
+        try:
+            invocation_id = r.stderr.strip().split()[-1]
+            preds = store.get_predictions_for_invocation(invocation_id)
+            self.assertEqual(len(preds), 1)
+            self.assertIsNone(preds[0].agent_findings)  # never [] when unavailable
+        finally:
+            store.close()
 
 
 if __name__ == "__main__":
