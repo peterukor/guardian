@@ -58,8 +58,11 @@ def render_text(passport: ChangePassport) -> str:
     lines.append("")
     lines.append("Recommended checks:")
     if passport.agent_available:
-        for check in passport.agent_checks:
-            lines.append(f"  - {check}")
+        if passport.agent_checks:
+            for check in passport.agent_checks:
+                lines.append(f"  - {check}")
+        else:
+            lines.append("  Nothing evidence-based to flag for this change.")
     else:
         lines.append(f"  [Agent unavailable — {passport.agent_error or 'unknown reason'}]")
 

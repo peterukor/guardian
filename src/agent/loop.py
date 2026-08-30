@@ -14,6 +14,13 @@ The Agent never computes evidence itself — every tool call here dispatches
 to a function in TOOL_FUNCTIONS (src/agent/tools.py), which only ever reads
 from the deterministic Evidence Store / Git History / Risk Scorer. This loop
 only relays messages and results; it must never fabricate a tool result.
+
+terminal_tool support: a caller may designate one tool name as the "submit
+the final answer" tool (e.g. submit_findings). Calling it ends the loop
+immediately with its raw arguments string, rather than continuing until the
+model produces free-text content. This exists because free-text "please
+reply with only JSON" is far less reliable than a tool call's arguments,
+which the provider already generates through a more constrained path.
 """
 
 from __future__ import annotations
@@ -30,19 +37,24 @@ def run_agent_loop(
     tools: list[dict],
     tool_functions: dict[str, Callable],
     max_turns: int = 10,
+    terminal_tool: str | None = None,
 ) -> str | None:
     """
     Run the tool-calling loop until the model returns a final (non-tool-call)
-    response, or max_turns is exceeded.
+    response, calls terminal_tool (if set), or max_turns is exceeded.
 
     messages       — initial conversation (system/user messages)
     tools          — tool definitions passed to chat_fn each turn
     tool_functions — name -> callable, dispatch table for executing tool calls
     max_turns      — safety cap; raises RuntimeError if never reached a final
                      response, rather than looping forever on a confused model
+    terminal_tool  — if set, calling this tool name ends the loop immediately;
+                     its arguments (raw JSON string, unparsed) are returned
+                     instead of executing it via tool_functions. Any other
+                     tool calls in the same turn are ignored once found.
 
-    Returns the final message content (str), or None if the model's final
-    message had no content.
+    Returns the final message content (str), the terminal tool's raw
+    arguments string, or None if the model's final message had no content.
     """
     conversation = list(messages)  # never mutate the caller's list
 
@@ -54,9 +66,14 @@ def run_agent_loop(
         if choice.get("finish_reason") != "tool_calls":
             return message.get("content")
 
-        conversation.append(message)
+        tool_calls = message.get("tool_calls", [])
+        if terminal_tool is not None:
+            for tool_call in tool_calls:
+                if tool_call["function"]["name"] == terminal_tool:
+                    return tool_call["function"]["arguments"]
 
-        for tool_call in message.get("tool_calls", []):
+        conversation.append(message)
+        for tool_call in tool_calls:
             conversation.append(_execute_tool_call(tool_call, tool_functions))
 
     raise RuntimeError(

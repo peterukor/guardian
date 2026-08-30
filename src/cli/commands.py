@@ -34,7 +34,6 @@ def cmd_scan(args: argparse.Namespace) -> None:
     print(f"  Branch:  {branch}  ({commit})")
     print(f"  Files:   {result.files_scanned}")
     print(f"  Edges:   {result.edges_stored}")
-    print(f"  DB:      {db_path}")
 
 
 def cmd_analyze(args: argparse.Namespace) -> None:
