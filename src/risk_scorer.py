@@ -26,6 +26,34 @@ from dataclasses import dataclass
 
 
 # ---------------------------------------------------------------------------
+# Risk level classification thresholds
+# ---------------------------------------------------------------------------
+
+RISK_THRESHOLD_LOW_MEDIUM: float = 4.0   # score < 4.0  → LOW
+RISK_THRESHOLD_MEDIUM_HIGH: float = 7.0  # score >= 7.0 → HIGH
+
+
+def classify_risk_level(score: float) -> str:
+    """
+    Return a human-readable risk label for a given risk score.
+
+    Thresholds:
+        score <  4.0  → "LOW"
+        4.0 <= score < 7.0  → "MEDIUM"
+        score >= 7.0  → "HIGH"
+
+    This function is deterministic and pure — it contains no I/O, no
+    randomness, and no calls to an AI model.  The Agent must never determine
+    the risk label itself; it must always call this function.
+    """
+    if score >= RISK_THRESHOLD_MEDIUM_HIGH:
+        return "HIGH"
+    if score >= RISK_THRESHOLD_LOW_MEDIUM:
+        return "MEDIUM"
+    return "LOW"
+
+
+# ---------------------------------------------------------------------------
 # Configuration — weights
 # ---------------------------------------------------------------------------
 
