@@ -139,7 +139,7 @@ def generate_agent_findings(
     if creds is None:
         return AgentResult(
             available=False,
-            error="Agent unavailable — WATSONX_API_KEY/WATSONX_URL/WATSONX_PROJECT_ID not configured.",
+            error="WATSONX_API_KEY/WATSONX_URL/WATSONX_PROJECT_ID not configured.",
         )
     api_key, url, project_id = creds
 
@@ -148,14 +148,14 @@ def generate_agent_findings(
 
     try:
         model = ModelInference(
-            model_id="ibm/granite-3-8b-instruct",
+            model_id="ibm/granite-4-h-small",
             credentials=Credentials(api_key=api_key, url=url),
             project_id=project_id,
         )
     except Exception as exc:
         return AgentResult(
             available=False,
-            error=f"Agent unavailable — could not initialize watsonx client: {exc}",
+            error=f"could not initialize watsonx client: {exc}",
         )
 
     def chat_fn(messages: list[dict], tools: list[dict]) -> dict:

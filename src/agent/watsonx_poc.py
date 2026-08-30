@@ -119,7 +119,7 @@ def run_poc() -> None:
     print(f"[PoC] Demo repo: {repo_path}")
 
     model = ModelInference(
-        model_id="ibm/granite-3-8b-instruct",
+        model_id="ibm/granite-4-h-small",
         credentials=Credentials(api_key=api_key, url=url),
         project_id=project_id,
     )
