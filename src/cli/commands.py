@@ -93,19 +93,25 @@ def cmd_analyze(args: argparse.Namespace) -> None:
 
     # Agent runs once for the whole batch of changed files -- never per file,
     # and never blocks the deterministic passport above from being shown.
-    from src.agent.integration import generate_agent_findings
-    agent_result = generate_agent_findings(repo_path, db_path, changed)
-    passport.agent_available = agent_result.available
-    passport.agent_findings = agent_result.findings
-    passport.agent_checks = agent_result.checks
-    passport.agent_error = agent_result.error
+    # Skip it entirely when nothing has evidence to investigate -- no point
+    # spending an API call on a batch with nothing real to reason about.
+    if not any(fp.evidence_available for fp in passport.files):
+        passport.agent_available = False
+        passport.agent_error = "No evidence available for any changed file — nothing to investigate."
+    else:
+        from src.agent.integration import generate_agent_findings
+        agent_result = generate_agent_findings(repo_path, db_path, changed)
+        passport.agent_available = agent_result.available
+        passport.agent_findings = agent_result.findings
+        passport.agent_checks = agent_result.checks
+        passport.agent_error = agent_result.error
 
     prediction_count, invocation_id = record_predictions(passport, db_path)
 
     if args.json:
         print(render_json(passport))
     else:
-        print(render_text(passport))
+        print(render_text(passport, top_n=args.top))
 
     # Printed to stderr, not stdout -- stdout must stay pure JSON when
     # --json is used, so a script piping/parsing the output isn't broken
